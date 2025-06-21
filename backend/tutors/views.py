@@ -31,7 +31,7 @@ class TutorProfileViewSet(viewsets.ModelViewSet):
 
     def get_permissions(self):
         if self.action in ['create', 'update', 'partial_update', 'destroy']:
-            self.permission_classes = [IsTutorOrAdmin]
+            self.permission_classes = [IsAuthenticated]
         return super().get_permissions()
 
     def get_queryset(self):
@@ -118,7 +118,7 @@ class SubjectViewSet(viewsets.ReadOnlyModelViewSet):
 class ScheduleViewSet(viewsets.ModelViewSet):
     queryset = Schedule.objects.select_related('tutor__user').prefetch_related('time_slots').all()
     serializer_class = ScheduleSerializer
-    permission_classes = [IsAuthenticated, IsTutorOrAdmin]
+    permission_classes = [IsAuthenticated, ]
 
     def get_queryset(self):
         if self.request.user.role == User.Role.TUTOR:
@@ -240,36 +240,70 @@ class BookingViewSet(viewsets.ModelViewSet):
         request=None,
         responses={200: BookingSerializer}
     )
-    @action(detail=True, methods=['post'], url_path='cancel')
-    def cancel_booking(self, request, pk=None):
+    @action(detail=True, methods=['post'])
+    def cancel(self, request, pk=None):
+        """Отменить бронирование и освободить слот"""
         booking = self.get_object()
-        if booking.status == Booking.StatusChoices.CANCELLED:
+        
+        # Проверяем, что бронирование можно отменить
+        if booking.status in ['cancelled', 'completed']:
             return Response(
-                {'detail': _("Booking is already cancelled.")},
+                {'detail': 'Это бронирование уже нельзя отменить'}, 
                 status=status.HTTP_400_BAD_REQUEST
             )
-        booking.status = Booking.StatusChoices.CANCELLED
+        
+        # Отменяем бронирование
+        booking.status = 'cancelled'
         booking.save()
-        serializer = self.get_serializer(booking)
-        return Response(serializer.data)
-
-    @extend_schema(
-        request=None,
-        responses={200: BookingSerializer}
-    )
-    @action(detail=True, methods=['post'], url_path='complete')
-    def complete_booking(self, request, pk=None):
+        
+        # Освобождаем временной слот
+        if booking.slot:
+            booking.slot.status = 'available'
+            booking.slot.save()
+        
+        return Response({'detail': 'Бронирование отменено, слот освобожден'})
+    
+    @action(detail=True, methods=['post'])
+    def confirm(self, request, pk=None):
+        """Подтвердить бронирование"""
         booking = self.get_object()
-        if booking.status != Booking.StatusChoices.CONFIRMED:
+        
+        if booking.status != 'pending':
             return Response(
-                {'detail': _("Only confirmed bookings can be completed.")},
+                {'detail': 'Можно подтвердить только ожидающие бронирования'}, 
                 status=status.HTTP_400_BAD_REQUEST
             )
-        booking.status = Booking.StatusChoices.COMPLETED
+        
+        booking.status = 'confirmed'
         booking.save()
-        serializer = self.get_serializer(booking)
-        return Response(serializer.data)
-
+        
+        # Убеждаемся, что слот помечен как забронированный
+        if booking.slot:
+            booking.slot.status = 'booked'
+            booking.slot.save()
+        
+        return Response({'detail': 'Бронирование подтверждено'})
+    
+    @action(detail=True, methods=['post'])
+    def complete(self, request, pk=None):
+        """Завершить занятие"""
+        booking = self.get_object()
+        
+        if booking.status != 'confirmed':
+            return Response(
+                {'detail': 'Можно завершить только подтвержденные бронирования'}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        booking.status = 'completed'
+        booking.save()
+        
+        # После завершения занятия слот становится недоступным
+        if booking.slot:
+            booking.slot.status = 'unavailable'
+            booking.slot.save()
+        
+        return Response({'detail': 'Занятие завершено'})
 
 class ReviewViewSet(viewsets.ModelViewSet):
     queryset = Review.objects.select_related(
@@ -280,7 +314,7 @@ class ReviewViewSet(viewsets.ModelViewSet):
 
     def get_permissions(self):
         if self.action in ['update', 'partial_update', 'destroy']:
-            self.permission_classes = [IsOwnerOrAdmin]
+            self.permission_classes = [IsAuthenticated]
         return super().get_permissions()
 
     def get_queryset(self):
